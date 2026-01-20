@@ -42,6 +42,9 @@ nul
 # Claude
 .claude/
 
+# Browser data (for test scripts)
+browser_data/
+
 # Other scripts (keep only main files)
 linux_do_analyzer*.py
 linux_do_bot.py

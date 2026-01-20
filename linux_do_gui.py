@@ -173,17 +173,25 @@ CFG = {
 
 
 class Bot:
-    def __init__(s, cfg, cats, lg, update_info=None, update_progress=None):
+    def __init__(s, cfg, cats, lg, update_info=None, update_progress=None, update_countdown=None, mode="endless", target_value=0, 
+                 enable_like=True, enable_reply=True, enable_wait=True):
         s.cfg = cfg
         s.cats = cats
         s.lg = lg
         s.update_info = update_info
         s.update_progress = update_progress  # 新增：更新进度回调
+        s.update_countdown = update_countdown  # 新增：更新倒计时回调
+        s.mode = mode  # 运行模式：endless(无尽), topics(帖子数), time(时间限制)
+        s.target_value = target_value  # 目标值：帖子数或分钟数
+        s.enable_like = enable_like  # 是否启用自动点赞
+        s.enable_reply = enable_reply  # 是否启用自动回复
+        s.enable_wait = enable_wait  # 是否启用等待时间
         s.pg = None
         s.run = False
         s.stats = {"topic": 0, "like": 0, "reply": 0, "like_reply": 0}
         s.user_info = None
         s.level_requirements = []  # 保存升级要求
+        s.start_time = None  # 记录开始时间
 
     def _random_delay(s, min_sec=0.5, max_sec=2.0, reason=""):
         """防风控：随机延迟"""
@@ -193,18 +201,57 @@ class Bot:
         time.sleep(delay)
 
     def start(s):
+        # 确保先关闭旧的浏览器实例
+        if s.pg:
+            s.lg("关闭旧的浏览器实例...")
+            try:
+                s.pg.quit()
+                time.sleep(1)  # 等待浏览器完全关闭
+            except:
+                pass
+            s.pg = None
+        
         s.lg("启动浏览器...")
-        try:
-            co = ChromiumOptions()
-            if s.cfg["proxy"]:
-                co.set_proxy(s.cfg["proxy"])
-            co.set_argument("--disable-blink-features=AutomationControlled")
-            s.pg = ChromiumPage(co)
-            s.lg("浏览器就绪")
-            return True
-        except Exception as e:
-            s.lg("启动失败: " + str(e))
-            return False
+        
+        # 重试机制（处理 404 错误）
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                co = ChromiumOptions()
+                
+                # 设置用户数据目录
+                user_data_dir = os.path.join(os.getcwd(), "browser_data")
+                co.set_user_data_path(user_data_dir)
+                
+                if s.cfg["proxy"]:
+                    co.set_proxy(s.cfg["proxy"])
+                co.set_argument("--disable-blink-features=AutomationControlled")
+                
+                # 设置浏览器窗口大小为屏幕高度
+                import tkinter as tk
+                root = tk.Tk()
+                screen_height = root.winfo_screenheight()
+                root.destroy()
+                
+                # 设置窗口大小：宽度1200，高度为屏幕高度
+                co.set_argument(f'--window-size=1200,{screen_height}')
+                s.lg(f"设置浏览器窗口大小: 1200x{screen_height}")
+                
+                s.pg = ChromiumPage(co)
+                s.lg("浏览器就绪")
+                return True
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "404" in error_msg and attempt < max_retries - 1:
+                    s.lg(f"启动失败（尝试 {attempt + 1}/{max_retries}），重试中...")
+                    time.sleep(2)
+                    continue
+                else:
+                    s.lg(f"启动失败: {error_msg}")
+                    return False
+        
+        return False
 
     def stop(s):
         s.run = False
@@ -213,9 +260,10 @@ class Bot:
         if s.pg:
             try:
                 s.pg.quit()
-            except:
-                pass
-            s.pg = None
+                time.sleep(0.5)  # 等待浏览器关闭
+            except Exception as e:
+                s.lg(f"关闭浏览器时出错: {e}")
+            s.pg = None  # 清空引用
 
     def check_login(s, wait_for_login=True, max_wait=600, check_interval=15):
         """
@@ -370,11 +418,32 @@ class Bot:
         return None
 
     def get_topics(s, cat):
-        """使用JS获取帖子列表"""
+        """使用JS获取帖子列表（按回复数排序）"""
         url = s.cfg["base"] + cat["u"]
         s.lg("进入板块: " + cat["n"])
         s.pg.get(url)
         s._random_delay(2, 4, "页面加载")
+
+        # 点击"回复"按钮进行排序
+        s.lg("点击'回复'按钮进行排序...")
+        clicked = s.pg.run_js("""
+        function clickRepliesSort() {
+            // 查找回复排序按钮
+            const replyButton = document.querySelector('th[data-sort-order="posts"] button');
+            if (replyButton) {
+                replyButton.click();
+                return true;
+            }
+            return false;
+        }
+        return clickRepliesSort();
+        """)
+        
+        if clicked:
+            s.lg("已点击回复排序按钮")
+            time.sleep(2)  # 等待排序完成
+        else:
+            s.lg("未找到回复排序按钮，使用默认排序")
 
         # 使用JS获取帖子 - 基于实际HTML结构
         topics = s.pg.run_js("""
@@ -404,26 +473,137 @@ class Bot:
 
         return topics or []
 
-    def scroll_page(s, duration=None):
-        """滚动页面 - 模拟真实阅读"""
-        if duration is None:
-            duration = random.uniform(8, 15)  # 增加阅读时间
+    def get_floor_info(s):
+        """获取楼层信息（当前楼层/总楼层）
+        
+        支持两种显示格式：
+        1. 宽窗口：.timeline-replies 显示 "1/169"
+        2. 窄窗口：#topic-progress .nums 显示 <span>69</span><span>/</span><span>74</span>
+        """
+        floor_info = s.pg.run_js("""
+        function getFloorInfo() {
+            // 方法1：尝试从 .timeline-replies 获取（宽窗口）
+            const timelineElement = document.querySelector('.timeline-replies');
+            if (timelineElement) {
+                const text = timelineElement.textContent.trim();
+                const match = text.match(/(\\d+)\\s*\\/\\s*(\\d+)/);
+                if (match) {
+                    return {
+                        current: parseInt(match[1]),
+                        total: parseInt(match[2]),
+                        source: 'timeline-replies'
+                    };
+                }
+            }
+            
+            // 方法2：尝试从 #topic-progress .nums 获取（窄窗口）
+            const progressElement = document.querySelector('#topic-progress .nums');
+            if (progressElement) {
+                const spans = progressElement.querySelectorAll('span');
+                if (spans.length >= 3) {
+                    const current = parseInt(spans[0].textContent);
+                    const total = parseInt(spans[2].textContent);
+                    if (!isNaN(current) && !isNaN(total)) {
+                        return {
+                            current: current,
+                            total: total,
+                            source: 'topic-progress'
+                        };
+                    }
+                }
+            }
+            
+            return null;
+        }
+        return getFloorInfo();
+        """)
+        
+        return floor_info
 
-        s.lg(f"模拟阅读 {duration:.1f}s...")
+    def scroll_page(s, duration=None):
+        """爬楼模式 - 使用楼层计数器跟踪进度"""
+        # 获取初始楼层信息
+        floor_info = s.get_floor_info()
+        if not floor_info:
+            s.lg("⚠ 无法获取楼层信息，使用传统滚动模式")
+            # 降级到传统滚动模式
+            s._scroll_page_legacy(duration)
+            return 0
+        
+        total_floors = floor_info['total']
+        s.lg(f"帖子总楼层数: {total_floors} (来源: {floor_info.get('source', 'unknown')})")
+        
+        if total_floors < 10:
+            s.lg(f"楼层数太少（{total_floors}），使用快速浏览")
+            s._scroll_page_legacy(duration)
+            return total_floors
+        
+        scroll_count = 0
+        floors_read = 1  # 从第1楼开始（主帖）
+        last_floor = 1
+        stuck_count = 0  # 楼层卡住计数
+        
+        # 开始爬楼
+        while floors_read < total_floors and s.run:
+            # 等待阅读（2-4秒）
+            wait_time = random.uniform(2, 4)
+            time.sleep(wait_time)
+            
+            # 滚动页面（600-1200px）
+            scroll_distance = random.randint(600, 1200)
+            s.pg.run_js(f"window.scrollBy(0, {scroll_distance})")
+            scroll_count += 1
+            
+            # 等待页面更新
+            time.sleep(0.5)
+            
+            # 获取当前楼层
+            floor_info = s.get_floor_info()
+            if floor_info:
+                current_floor = floor_info['current']
+                floors_read = current_floor
+                
+                if current_floor > last_floor:
+                    s.lg(f"爬楼 #{scroll_count} → 当前: {current_floor}/{total_floors} 楼")
+                    last_floor = current_floor
+                    stuck_count = 0
+                else:
+                    stuck_count += 1
+                    
+                    # 如果楼层长时间不变，尝试更大的滚动
+                    if stuck_count >= 3:
+                        s.lg("楼层卡住，加大滚动距离")
+                        s.pg.run_js(f"window.scrollBy(0, 1500)")
+                        time.sleep(1)
+                        stuck_count = 0
+            
+            # 安全检查：避免无限循环
+            if scroll_count >= 200:
+                s.lg("达到最大滚动次数，停止爬楼")
+                break
+        
+        s.lg(f"爬楼完成: 滚动 {scroll_count} 次，读取 {floors_read}/{total_floors} 楼")
+        return floors_read
+    
+    def _scroll_page_legacy(s, duration=None):
+        """传统滚动模式 - 用于无法获取楼层信息的情况"""
+        if duration is None:
+            duration = random.uniform(8, 15)
+
+        s.lg(f"传统滚动模式 {duration:.1f}s...")
         start = time.time()
         while time.time() - start < duration and s.run:
             dist = random.randint(150, 400)
             s.pg.run_js(f"window.scrollBy(0, {dist})")
-            # 随机停顿，模拟阅读
             time.sleep(random.uniform(1.0, 3.0))
 
             at_bottom = s.pg.run_js("""
             return (window.innerHeight + window.scrollY) >= document.body.offsetHeight - 100;
             """)
             if at_bottom:
-                # 到底部后随机停留
                 s._random_delay(1, 3, "阅读完毕")
                 break
+        return 0
 
     def do_like(s, index=0):
         """点赞"""
@@ -547,9 +727,19 @@ class Bot:
             # 更新进度
             if s.update_progress:
                 s.update_progress(s.stats)
+            
+            # 更新倒计时
+            if s.update_countdown and s.start_time:
+                s._update_countdown_display()
 
-            # 滚动阅读
-            s.scroll_page()
+            # 爬楼阅读（返回读取的楼层数）
+            floors_read = s.scroll_page()
+            
+            # 统计爬楼数
+            if "floors" not in s.stats:
+                s.stats["floors"] = 0
+            s.stats["floors"] += floors_read
+            
             s._random_delay(1, 2, "阅读后")
 
             # 获取点赞按钮数量
@@ -562,27 +752,54 @@ class Bot:
 
             s.lg(f"找到 {btn_count} 个点赞按钮")
 
-            # 随机点赞主帖
-            if btn_count > 0 and random.random() < s.cfg["like_rate"]:
+            # 随机点赞主帖（检查开关）
+            if s.enable_like and btn_count > 0 and random.random() < s.cfg["like_rate"]:
                 s.do_like(0)
-                s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "点赞后休息")
+                if s.enable_wait:
+                    s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "点赞后休息")
 
-            # 随机点赞回复
-            if btn_count > 1:
+            # 随机点赞回复（检查开关）
+            if s.enable_like and btn_count > 1:
                 for i in range(1, min(btn_count, 5)):
                     if random.random() < s.cfg["like_reply_rate"]:
                         s.do_like(i)
-                        s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "点赞回复后")
+                        if s.enable_wait:
+                            s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "点赞回复后")
 
-            # 随机回帖
-            if random.random() < s.cfg["reply_rate"]:
-                s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "准备回帖")
+            # 随机回帖（检查开关）
+            if s.enable_reply and random.random() < s.cfg["reply_rate"]:
+                if s.enable_wait:
+                    s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "准备回帖")
                 s.do_reply()
 
             return True
         except Exception as e:
             s.lg("浏览失败: " + str(e))
             return False
+    
+    def _update_countdown_display(s):
+        """更新倒计时显示"""
+        if not s.update_countdown or not s.start_time:
+            return
+        
+        elapsed_time = time.time() - s.start_time
+        elapsed_minutes = int(elapsed_time / 60)
+        elapsed_seconds = int(elapsed_time % 60)
+        
+        if s.mode == "topics":
+            remaining = s.target_value - s.stats['topic']
+            text = f"剩余: {remaining} 个帖子 | 用时: {elapsed_minutes}:{elapsed_seconds:02d}"
+        elif s.mode == "time":
+            elapsed_mins = elapsed_time / 60
+            remaining_mins = s.target_value - elapsed_mins
+            if remaining_mins > 0:
+                text = f"剩余: {int(remaining_mins)} 分钟 | 帖子: {s.stats['topic']}"
+            else:
+                text = f"已超时 | 帖子: {s.stats['topic']}"
+        else:  # endless
+            text = f"用时: {elapsed_minutes}:{elapsed_seconds:02d} | 帖子: {s.stats['topic']}"
+        
+        s.update_countdown(text)
 
     def browse_cat(s, cat):
         """浏览板块"""
@@ -604,20 +821,22 @@ class Bot:
             s.browse_topic(topic)
             browsed += 1
 
-            # 防风控：帖子之间随机等待
-            if s.run:
+            # 防风控：帖子之间随机等待（检查开关）
+            if s.run and s.enable_wait:
                 s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "切换帖子")
 
         return browsed
 
     def run_session(s):
         s.run = True
-        s.stats = {"topic": 0, "like": 0, "reply": 0, "like_reply": 0}
+        s.stats = {"topic": 0, "like": 0, "reply": 0, "like_reply": 0, "floors": 0}
+        s.start_time = time.time()  # 记录开始时间
 
         if not s.start():
             return
 
         login_success = False
+        
         try:
             if not s.check_login(wait_for_login=True, max_wait=300, check_interval=5):
                 s.lg("登录检查失败或超时，任务终止")
@@ -632,23 +851,91 @@ class Bot:
             enabled = [c for c in s.cats if c.get("e", True)]
             random.shuffle(enabled)
 
-            s.lg("=" * 30)
+            # 显示运行模式
+            if s.mode == "topics":
+                s.lg("=" * 30)
+                s.lg(f"运行模式: 帖子数量限制 (目标: {s.target_value} 个帖子)")
+                s.lg("=" * 30)
+            elif s.mode == "time":
+                s.lg("=" * 30)
+                s.lg(f"运行模式: 时间限制 (目标: {s.target_value} 分钟)")
+                s.lg("=" * 30)
+            else:
+                s.lg("=" * 30)
+                s.lg("运行模式: 无尽模式 (手动停止)")
+                s.lg("=" * 30)
+            
+            # 显示功能开关状态
+            features = []
+            if s.enable_like:
+                features.append("自动点赞")
+            if s.enable_reply:
+                features.append("自动回复")
+            if s.enable_wait:
+                features.append("等待延迟")
+            s.lg(f"启用功能: {', '.join(features) if features else '仅浏览'}")
+
             s.lg(f"开始浏览 {len(enabled)} 个板块")
             s.lg("=" * 30)
 
-            for cat in enabled:
-                if not s.run:
+            # 无尽循环板块
+            while s.run:
+                for cat in enabled:
+                    if not s.run:
+                        break
+                    
+                    # 检查是否达到目标
+                    if s.mode == "topics" and s.stats['topic'] >= s.target_value:
+                        s.lg(f"已达到目标帖子数: {s.stats['topic']}/{s.target_value}")
+                        s.run = False
+                        break
+                    
+                    if s.mode == "time":
+                        elapsed_minutes = (time.time() - s.start_time) / 60
+                        if elapsed_minutes >= s.target_value:
+                            s.lg(f"已达到目标时间: {int(elapsed_minutes)}/{s.target_value} 分钟")
+                            s.run = False
+                            break
+                    
+                    s.browse_cat(cat)
+                    
+                    # 显示进度
+                    if s.mode == "topics":
+                        remaining = s.target_value - s.stats['topic']
+                        s.lg(f"📊 进度: {s.stats['topic']}/{s.target_value} 个帖子 (剩余 {remaining} 个)")
+                    elif s.mode == "time":
+                        elapsed_minutes = (time.time() - s.start_time) / 60
+                        remaining_minutes = s.target_value - elapsed_minutes
+                        s.lg(f"⏱ 进度: {int(elapsed_minutes)}/{s.target_value} 分钟 (剩余 {int(remaining_minutes)} 分钟)")
+                    
+                    # 板块之间随机等待（检查开关）
+                    if s.enable_wait:
+                        s._random_delay(s.cfg["wait_min"] + 1, s.cfg["wait_max"] + 2, "切换板块")
+                
+                # 如果不是无尽模式，退出循环
+                if s.mode != "endless":
                     break
-                s.browse_cat(cat)
-                # 板块之间随机等待（板块切换用稍长一点的时间）
-                s._random_delay(s.cfg["wait_min"] + 1, s.cfg["wait_max"] + 2, "切换板块")
+                
+                # 无尽模式：重新打乱板块顺序
+                if s.run:
+                    random.shuffle(enabled)
+                    s.lg("=" * 30)
+                    s.lg("继续下一轮浏览...")
+                    s.lg("=" * 30)
+
+            # 计算耗时
+            elapsed_time = time.time() - s.start_time
+            elapsed_minutes = int(elapsed_time / 60)
+            elapsed_seconds = int(elapsed_time % 60)
 
             s.lg("=" * 30)
             s.lg("完成!")
             s.lg(f"浏览帖子: {s.stats['topic']}")
+            s.lg(f"爬楼总数: {s.stats.get('floors', 0)} 楼")
             s.lg(f"点赞主帖: {s.stats['like']}")
             s.lg(f"点赞回复: {s.stats['like_reply']}")
             s.lg(f"回帖数量: {s.stats['reply']}")
+            s.lg(f"耗时: {elapsed_minutes} 分 {elapsed_seconds} 秒")
             s.lg("=" * 30)
 
             # 重新获取等级信息以验证效果（在关闭浏览器前）
@@ -669,9 +956,9 @@ class Bot:
 class GUI:
     def __init__(s):
         s.rt = tk.Tk()
-        s.rt.title("Linux.do 刷帖助手 v8.0")
-        s.rt.geometry("750x850")
-        s.rt.minsize(750, 750)  # 设置最小窗口大小
+        s.rt.title("Linux.do 刷帖助手 v8.1")
+        s.rt.geometry("550x920")
+        s.rt.minsize(550, 850)  # 设置最小窗口大小
         s.rt.configure(bg="#1a1a2e")
 
         # 设置窗口图标
@@ -758,14 +1045,33 @@ class GUI:
         s.tray_icon.icon = create_tray_image(color)
 
         # 更新提示文字
+        tooltip = f"Linux.do 刷帖助手 v8.1 - {status}\n"
+        
+        if s.bot and s.bot.start_time:
+            # 计算用时
+            elapsed_time = time.time() - s.bot.start_time
+            elapsed_minutes = int(elapsed_time / 60)
+            elapsed_seconds = int(elapsed_time % 60)
+            
+            # 显示模式
+            if s.bot.mode == "topics":
+                remaining = s.bot.target_value - s.bot.stats.get('topic', 0)
+                tooltip += f"模式: 帖子限制 (剩余 {remaining}/{s.bot.target_value})\n"
+            elif s.bot.mode == "time":
+                elapsed_mins = elapsed_time / 60
+                remaining_mins = s.bot.target_value - elapsed_mins
+                tooltip += f"模式: 时间限制 (剩余 {int(remaining_mins)}/{s.bot.target_value}分钟)\n"
+            else:
+                tooltip += f"模式: 无尽模式\n"
+            
+            tooltip += f"用时: {elapsed_minutes}:{elapsed_seconds:02d}\n"
+        
         if stats:
-            tooltip = f"Linux.do 刷帖助手 - {status}\n"
             tooltip += f"帖子: {stats.get('topic', 0)} | "
+            tooltip += f"爬楼: {stats.get('floors', 0)} | "
             tooltip += f"点赞: {stats.get('like', 0) + stats.get('like_reply', 0)} | "
             tooltip += f"回复: {stats.get('reply', 0)}"
-        else:
-            tooltip = f"Linux.do 刷帖助手 - {status}"
-
+        
         s.tray_icon.title = tooltip
 
     def _show_window(s, icon=None, item=None):
@@ -871,7 +1177,7 @@ class GUI:
 
         title_label = tk.Label(
             title_left,
-            text="Linux.do 刷帖助手 v8.0",
+            text="Linux.do 刷帖助手 v8.1",
             font=("Microsoft YaHei UI", 11, "bold"),
             bg="#0f3460",
             fg="#ffffff",
@@ -994,6 +1300,85 @@ class GUI:
         s.progress_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         s.progress_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
 
+        # 运行模式选择
+        mode_frame = tk.LabelFrame(
+            content,
+            text=" 运行模式 ",
+            bg="#1a1a2e",
+            fg="#00d9ff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        mode_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        mode_inner = tk.Frame(mode_frame, bg="#1a1a2e")
+        mode_inner.pack(fill=tk.X, padx=10, pady=8)
+
+        s.mode_var = tk.StringVar(value="endless")
+        
+        # 无尽模式
+        tk.Radiobutton(
+            mode_inner,
+            text="无尽模式",
+            variable=s.mode_var,
+            value="endless",
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#16213e",
+            activebackground="#1a1a2e",
+            activeforeground="#00d9ff",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.LEFT, padx=10)
+
+        # 帖子数量模式
+        tk.Radiobutton(
+            mode_inner,
+            text="帖子数量:",
+            variable=s.mode_var,
+            value="topics",
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#16213e",
+            activebackground="#1a1a2e",
+            activeforeground="#00d9ff",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.LEFT, padx=10)
+        
+        s.topics_var = tk.StringVar(value="50")
+        tk.Entry(
+            mode_inner,
+            textvariable=s.topics_var,
+            width=8,
+            bg="#16213e",
+            fg="#eaeaea",
+            insertbackground="#eaeaea",
+        ).pack(side=tk.LEFT, padx=2)
+        tk.Label(mode_inner, text="个", bg="#1a1a2e", fg="#eaeaea", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+
+        # 时间限制模式
+        tk.Radiobutton(
+            mode_inner,
+            text="时间限制:",
+            variable=s.mode_var,
+            value="time",
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#16213e",
+            activebackground="#1a1a2e",
+            activeforeground="#00d9ff",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.LEFT, padx=10)
+        
+        s.time_var = tk.StringVar(value="30")
+        tk.Entry(
+            mode_inner,
+            textvariable=s.time_var,
+            width=8,
+            bg="#16213e",
+            fg="#eaeaea",
+            insertbackground="#eaeaea",
+        ).pack(side=tk.LEFT, padx=2)
+        tk.Label(mode_inner, text="分钟", bg="#1a1a2e", fg="#eaeaea", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+
         # 控制栏
         ctrl = tk.Frame(content, bg="#1a1a2e", pady=5)
         ctrl.pack(fill=tk.X, padx=15)
@@ -1022,6 +1407,23 @@ class GUI:
             ctrl,
             text="停止",
             command=s._stop,
+            width=8,
+            bg="#e94560",
+            fg="white",
+            state=tk.DISABLED,
+        )
+        s.stop_btn.pack(side=tk.LEFT)
+        
+        # 倒计时/倒计数显示
+        s.countdown_var = tk.StringVar(value="")
+        s.countdown_label = tk.Label(
+            ctrl,
+            textvariable=s.countdown_var,
+            bg="#1a1a2e",
+            fg="#00d9ff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        s.countdown_label.pack(side=tk.LEFT, padx=15)
             width=8,
             bg="#e94560",
             fg="white",
@@ -1085,26 +1487,72 @@ class GUI:
         # 参数设置
         param = tk.Frame(right, bg="#1a1a2e")
         param.pack(fill=tk.X, pady=5)
-        tk.Label(param, text="点赞率:", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
+        
+        # 第一行：点赞率和回复率
+        param_row1 = tk.Frame(param, bg="#1a1a2e")
+        param_row1.pack(fill=tk.X, pady=2)
+        
+        # 自动点赞开关
+        s.enable_like_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            param_row1,
+            text="自动点赞",
+            variable=s.enable_like_var,
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#0f3460",
+            activebackground="#1a1a2e",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Label(param_row1, text="点赞率:", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
         s.like_var = tk.StringVar(value="30")
         tk.Entry(
-            param, textvariable=s.like_var, width=4, bg="#16213e", fg="#eaeaea"
+            param_row1, textvariable=s.like_var, width=4, bg="#16213e", fg="#eaeaea"
         ).pack(side=tk.LEFT)
-        tk.Label(param, text="%  回复率:", bg="#1a1a2e", fg="#eaeaea").pack(
-            side=tk.LEFT, padx=(10, 0)
-        )
+        tk.Label(param_row1, text="%", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT, padx=(0, 15))
+        
+        # 自动回复开关
+        s.enable_reply_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            param_row1,
+            text="自动回复",
+            variable=s.enable_reply_var,
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#0f3460",
+            activebackground="#1a1a2e",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Label(param_row1, text="回复率:", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
         s.reply_var = tk.StringVar(value="5")
         tk.Entry(
-            param, textvariable=s.reply_var, width=4, bg="#16213e", fg="#eaeaea"
+            param_row1, textvariable=s.reply_var, width=4, bg="#16213e", fg="#eaeaea"
         ).pack(side=tk.LEFT)
-        tk.Label(param, text="%  等待:", bg="#1a1a2e", fg="#eaeaea").pack(
-            side=tk.LEFT, padx=(10, 0)
-        )
+        tk.Label(param_row1, text="%", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
+        
+        # 第二行：等待时间
+        param_row2 = tk.Frame(param, bg="#1a1a2e")
+        param_row2.pack(fill=tk.X, pady=2)
+        
+        # 等待时间开关
+        s.enable_wait_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            param_row2,
+            text="启用等待",
+            variable=s.enable_wait_var,
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            selectcolor="#0f3460",
+            activebackground="#1a1a2e",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Label(param_row2, text="等待:", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
         s.wait_var = tk.StringVar(value="1-3")
         tk.Entry(
-            param, textvariable=s.wait_var, width=6, bg="#16213e", fg="#eaeaea"
+            param_row2, textvariable=s.wait_var, width=6, bg="#16213e", fg="#eaeaea"
         ).pack(side=tk.LEFT)
-        tk.Label(param, text="秒", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
+        tk.Label(param_row2, text="秒", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(param_row2, text="(已有滚动延迟，可关闭)", bg="#1a1a2e", fg="#888888", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
 
         # 统计信息
         stats_frame = tk.LabelFrame(
@@ -1320,6 +1768,14 @@ class GUI:
             s._update_tray_status("运行中", stats)
 
         s.rt.after(0, update)
+    
+    def _update_countdown(s, text):
+        """更新倒计时显示"""
+        def update():
+            s.countdown_var.set(text)
+        s.rt.after(0, update)
+
+        s.rt.after(0, update)
 
     def _lg(s, msg):
         def log():
@@ -1368,8 +1824,30 @@ class GUI:
 
         # 重置初始数据
         s.initial_requirements = []
-
-        s.bot = Bot(s.cfg, s.cats, s._lg, s._update_info, s._update_progress)
+        
+        # 读取运行模式设置
+        mode = s.mode_var.get()
+        target_value = 0
+        
+        if mode == "topics":
+            try:
+                target_value = int(s.topics_var.get())
+            except:
+                target_value = 50
+        elif mode == "time":
+            try:
+                target_value = int(s.time_var.get())
+            except:
+                target_value = 30
+        
+        # 读取开关状态
+        enable_like = s.enable_like_var.get()
+        enable_reply = s.enable_reply_var.get()
+        enable_wait = s.enable_wait_var.get()
+        
+        s.bot = Bot(s.cfg, s.cats, s._lg, s._update_info, s._update_progress, s._update_countdown,
+                    mode=mode, target_value=target_value,
+                    enable_like=enable_like, enable_reply=enable_reply, enable_wait=enable_wait)
         s.th = threading.Thread(target=s._run, daemon=True)
         s.th.start()
 
