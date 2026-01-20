@@ -1424,12 +1424,6 @@ class GUI:
             font=("Microsoft YaHei UI", 10, "bold"),
         )
         s.countdown_label.pack(side=tk.LEFT, padx=15)
-            width=8,
-            bg="#e94560",
-            fg="white",
-            state=tk.DISABLED,
-        )
-        s.stop_btn.pack(side=tk.LEFT)
 
         # 主区域
         main = tk.Frame(content, bg="#1a1a2e")
