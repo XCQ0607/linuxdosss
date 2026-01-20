@@ -12,7 +12,7 @@ import platform
 
 # 项目信息
 APP_NAME = "LinuxDoHelper"
-APP_VERSION = "8.1"
+APP_VERSION = "8.2"
 MAIN_SCRIPT = "linux_do_gui.py"
 ICON_WIN = "icon.ico"  # Windows图标
 ICON_MAC = "icon.icns"  # macOS图标

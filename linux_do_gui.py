@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Linux.do 论坛刷帖助手 v8.0
+Linux.do 论坛刷帖助手 v8.2
 功能：
 1. 自动获取用户等级和升级进度
 2. 多板块浏览
@@ -956,7 +956,7 @@ class Bot:
 class GUI:
     def __init__(s):
         s.rt = tk.Tk()
-        s.rt.title("Linux.do 刷帖助手 v8.1")
+        s.rt.title("Linux.do 刷帖助手 v8.2")
         s.rt.geometry("550x920")
         s.rt.minsize(550, 850)  # 设置最小窗口大小
         s.rt.configure(bg="#1a1a2e")
@@ -1045,7 +1045,7 @@ class GUI:
         s.tray_icon.icon = create_tray_image(color)
 
         # 更新提示文字
-        tooltip = f"Linux.do 刷帖助手 v8.1 - {status}\n"
+        tooltip = f"Linux.do 刷帖助手 v8.2 - {status}\n"
         
         if s.bot and s.bot.start_time:
             # 计算用时
@@ -1177,7 +1177,7 @@ class GUI:
 
         title_label = tk.Label(
             title_left,
-            text="Linux.do 刷帖助手 v8.1",
+            text="Linux.do 刷帖助手 v8.2",
             font=("Microsoft YaHei UI", 11, "bold"),
             bg="#0f3460",
             fg="#ffffff",
