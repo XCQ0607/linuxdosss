@@ -586,6 +586,12 @@ class Bot:
 
         # 开始爬楼
         while current_floor < total_floors and s.run:
+            # 检查是否达到目标（深度爬楼模式下实时检查）
+            if s._check_target_reached():
+                s.lg(f"已达到目标，停止爬楼")
+                s.run = False
+                break
+
             # 等待阅读（2-4秒）
             wait_time = random.uniform(2, 4)
             time.sleep(wait_time)
@@ -908,28 +914,57 @@ class Bot:
         elapsed_minutes = int(elapsed_time / 60)
         elapsed_seconds = int(elapsed_time % 60)
 
-        # 计算已读帖子总数 = 帖子数 + 爬楼数
-        total_read = s.stats.get("topic", 0) + s.stats.get("floors", 0)
-        topics = s.stats.get("topic", 0)
-        floors = s.stats.get("floors", 0)
+        # 根据浏览模式计算已读数
+        if s.browse_mode == "quick":
+            # 快速浏览模式：只计算主题数
+            total_read = s.stats.get("topic", 0)
+            read_desc = f"主题{total_read}"
+        else:
+            # 深度爬楼模式：计算主题+楼层
+            topics = s.stats.get("topic", 0)
+            floors = s.stats.get("floors", 0)
+            total_read = topics + floors
+            read_desc = f"帖{topics}+楼{floors}"
 
         if s.mode == "topics":
             remaining = s.target_value - total_read
-            text = f"剩余: {remaining} | 已读: {total_read} (帖{topics}+楼{floors}) | 用时: {elapsed_minutes}:{elapsed_seconds:02d}"
+            text = f"剩余: {remaining} | 已读: {total_read} ({read_desc}) | 用时: {elapsed_minutes}:{elapsed_seconds:02d}"
         elif s.mode == "time":
-            elapsed_mins = elapsed_time / 60
-            remaining_mins = s.target_value - elapsed_mins
-            if remaining_mins > 0:
-                text = f"剩余: {int(remaining_mins)}分钟 | 已读: {total_read} (帖{topics}+楼{floors})"
+            elapsed_secs = elapsed_time
+            remaining_secs = s.target_value * 60 - elapsed_secs
+            if remaining_secs > 0:
+                remaining_mins = int(remaining_secs / 60)
+                remaining_s = int(remaining_secs % 60)
+                text = f"剩余: {remaining_mins}:{remaining_s:02d} | 已读: {total_read} ({read_desc})"
             else:
-                text = f"已超时 | 已读: {total_read} (帖{topics}+楼{floors})"
+                text = f"已超时 | 已读: {total_read} ({read_desc})"
         else:  # endless
-            text = f"用时: {elapsed_minutes}:{elapsed_seconds:02d} | 已读: {total_read} (帖{topics}+楼{floors})"
+            text = f"用时: {elapsed_minutes}:{elapsed_seconds:02d} | 已读: {total_read} ({read_desc})"
 
         s.update_countdown(text)
 
+    def _check_target_reached(s):
+        """检查是否达到目标，返回True表示应该停止"""
+        if s.mode == "topics":
+            if s.browse_mode == "quick":
+                # 快速浏览模式：只计算主题数
+                return s.stats.get("topic", 0) >= s.target_value
+            else:
+                # 深度爬楼模式：计算主题+楼层
+                total_read = s.stats.get("topic", 0) + s.stats.get("floors", 0)
+                return total_read >= s.target_value
+        elif s.mode == "time":
+            if s.start_time:
+                elapsed_minutes = (time.time() - s.start_time) / 60
+                return elapsed_minutes >= s.target_value
+        return False
+
     def browse_cat(s, cat):
         """浏览板块"""
+        # 先检查是否已达到目标
+        if s._check_target_reached():
+            return 0
+
         topics = s.get_topics(cat)
         s.lg(f"找到 {len(topics)} 个帖子")
 
@@ -945,8 +980,18 @@ class Bot:
             if not s.run:
                 break
 
+            # 检查是否已达到目标
+            if s._check_target_reached():
+                s.run = False
+                break
+
             s.browse_topic(topic)
             browsed += 1
+
+            # 再次检查是否已达到目标
+            if s._check_target_reached():
+                s.run = False
+                break
 
             # 防风控：帖子之间随机等待（检查开关）
             if s.run and s.enable_wait:
@@ -1011,36 +1056,56 @@ class Bot:
                     if not s.run:
                         break
 
-                    # 计算已读总数 = 帖子数 + 爬楼数
-                    total_read = s.stats.get("topic", 0) + s.stats.get("floors", 0)
-
                     # 检查是否达到目标
-                    if s.mode == "topics" and total_read >= s.target_value:
-                        s.lg(
-                            f"已达到目标已读数: {total_read}/{s.target_value} (帖子{s.stats['topic']}+爬楼{s.stats.get('floors', 0)})"
-                        )
+                    if s._check_target_reached():
+                        if s.browse_mode == "quick":
+                            s.lg(
+                                f"已达到目标主题数: {s.stats.get('topic', 0)}/{s.target_value}"
+                            )
+                        else:
+                            total_read = s.stats.get("topic", 0) + s.stats.get(
+                                "floors", 0
+                            )
+                            s.lg(
+                                f"已达到目标已读数: {total_read}/{s.target_value} (帖子{s.stats['topic']}+爬楼{s.stats.get('floors', 0)})"
+                            )
                         s.run = False
                         break
 
-                    if s.mode == "time":
-                        elapsed_minutes = (time.time() - s.start_time) / 60
-                        if elapsed_minutes >= s.target_value:
-                            s.lg(
-                                f"已达到目标时间: {int(elapsed_minutes)}/{s.target_value} 分钟"
-                            )
-                            s.run = False
-                            break
-
                     s.browse_cat(cat)
 
+                    # 再次检查是否达到目标（browse_cat后可能已达到）
+                    if s._check_target_reached():
+                        if s.browse_mode == "quick":
+                            s.lg(
+                                f"已达到目标主题数: {s.stats.get('topic', 0)}/{s.target_value}"
+                            )
+                        else:
+                            total_read = s.stats.get("topic", 0) + s.stats.get(
+                                "floors", 0
+                            )
+                            s.lg(
+                                f"已达到目标已读数: {total_read}/{s.target_value} (帖子{s.stats['topic']}+爬楼{s.stats.get('floors', 0)})"
+                            )
+                        s.run = False
+                        break
+
                     # 显示进度
-                    total_read = s.stats.get("topic", 0) + s.stats.get("floors", 0)
-                    if s.mode == "topics":
-                        remaining = s.target_value - total_read
-                        s.lg(
-                            f"📊 进度: {total_read}/{s.target_value} (帖子{s.stats['topic']}+爬楼{s.stats.get('floors', 0)}) 剩余 {remaining}"
-                        )
-                    elif s.mode == "time":
+                    if s.browse_mode == "quick":
+                        if s.mode == "topics":
+                            remaining = s.target_value - s.stats.get("topic", 0)
+                            s.lg(
+                                f"📊 进度: {s.stats.get('topic', 0)}/{s.target_value} 主题 (剩余 {remaining})"
+                            )
+                    else:
+                        total_read = s.stats.get("topic", 0) + s.stats.get("floors", 0)
+                        if s.mode == "topics":
+                            remaining = s.target_value - total_read
+                            s.lg(
+                                f"📊 进度: {total_read}/{s.target_value} (帖子{s.stats['topic']}+爬楼{s.stats.get('floors', 0)}) 剩余 {remaining}"
+                            )
+
+                    if s.mode == "time":
                         elapsed_minutes = (time.time() - s.start_time) / 60
                         remaining_minutes = s.target_value - elapsed_minutes
                         s.lg(
@@ -1048,13 +1113,13 @@ class Bot:
                         )
 
                     # 板块之间随机等待（检查开关）
-                    if s.enable_wait:
+                    if s.enable_wait and s.run:
                         s._random_delay(
                             s.cfg["wait_min"] + 1, s.cfg["wait_max"] + 2, "切换板块"
                         )
 
-                # 如果不是无尽模式，退出循环
-                if s.mode != "endless":
+                # 如果不是无尽模式或已达到目标，退出循环
+                if s.mode != "endless" or not s.run:
                     break
 
                 # 无尽模式：重新打乱板块顺序
