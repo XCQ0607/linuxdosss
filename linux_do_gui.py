@@ -18,6 +18,24 @@ import sys, os, random, time, json, threading
 import urllib.request
 import urllib.error
 from datetime import datetime, date
+
+# Linux 输入法兼容性修复（必须在导入 tkinter 之前设置）
+import platform
+
+if platform.system() == "Linux":
+    # 尝试检测并设置输入法环境变量
+    if "GTK_IM_MODULE" not in os.environ:
+        # 检测 fcitx
+        if os.path.exists("/usr/bin/fcitx") or os.path.exists("/usr/bin/fcitx5"):
+            os.environ["GTK_IM_MODULE"] = "fcitx"
+            os.environ["QT_IM_MODULE"] = "fcitx"
+            os.environ["XMODIFIERS"] = "@im=fcitx"
+        # 检测 ibus
+        elif os.path.exists("/usr/bin/ibus"):
+            os.environ["GTK_IM_MODULE"] = "ibus"
+            os.environ["QT_IM_MODULE"] = "ibus"
+            os.environ["XMODIFIERS"] = "@im=ibus"
+
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 
