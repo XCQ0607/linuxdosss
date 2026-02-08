@@ -47,8 +47,7 @@ name: Run Schedule
 on:
   # 定时触发（默认每天北京时间 8:00 和 20:00 各运行一次）
   schedule:
-    - cron: '0 0 * * *'   # UTC 0:00 = 北京时间 8:00
-    - cron: '0 12 * * *'  # UTC 12:00 = 北京时间 20:00
+    - cron: '0 */8 * * *' # 每8小时运行一次 (UTC 0:00, 8:00, 16:00)
 
   # 手动触发
   workflow_dispatch:
@@ -56,11 +55,11 @@ on:
       topics:
         description: '浏览帖子数量'
         required: false
-        default: '30'
+        default: '80''
       like_rate:
         description: '点赞概率 (0-100)'
         required: false
-        default: '30'
+        default: '40'
 
 jobs:
   browse:
@@ -100,7 +99,7 @@ jobs:
         run: |
           # 获取参数（手动触发时使用输入值，定时触发时使用默认值）
           TOPICS="${{ github.event.inputs.topics || '30' }}"
-          LIKE_RATE="${{ github.event.inputs.like_rate || '30' }}"
+          LIKE_RATE="${{ github.event.inputs.like_rate || '40' }}"
           
           echo "========================================"
           echo "开始运行 Linux.do 自动浏览"

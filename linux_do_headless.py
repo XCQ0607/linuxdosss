@@ -98,28 +98,29 @@ CATEGORIES = [
     {"name": "资源荟萃", "url": "/c/resource/14", "enabled": True},
     {"name": "网盘资源", "url": "/c/resource/cloud-asset/94", "enabled": True},
     {"name": "文档共建", "url": "/c/wiki/42", "enabled": True},
-    {"name": "积分乐园", "url": "/c/credit/106", "enabled": False},  # 默认禁用
+    {"name": "积分乐园", "url": "/c/credit/106", "enabled": True},  # 默认禁用
     {"name": "非我莫属", "url": "/c/job/27", "enabled": True},
     {"name": "读书成诗", "url": "/c/reading/32", "enabled": True},
-    {"name": "扬帆起航", "url": "/c/startup/46", "enabled": False},  # 默认禁用
+    {"name": "扬帆起航", "url": "/c/startup/46", "enabled": True},  # 默认禁用
     {"name": "前沿快讯", "url": "/c/news/34", "enabled": True},
     {"name": "网络记忆", "url": "/c/feeds/92", "enabled": True},
     {"name": "福利羊毛", "url": "/c/welfare/36", "enabled": True},
     {"name": "搞七捻三", "url": "/c/gossip/11", "enabled": True},
-    {"name": "社区孵化", "url": "/c/incubator/102", "enabled": False},  # 默认禁用
+    {"name": "社区孵化", "url": "/c/incubator/102", "enabled": True},  # 默认禁用
     {"name": "虫洞广场", "url": "/c/square/110", "enabled": True},
-    {"name": "运营反馈", "url": "/c/feedback/2", "enabled": False},  # 默认禁用
+    {"name": "运营反馈", "url": "/c/feedback/2", "enabled": True},  # 默认禁用
 ]
 
 # 默认配置
 DEFAULT_CONFIG = {
     "base_url": "https://linux.do",
-    "like_rate": 0.3,  # 点赞概率 30%
+    "like_rate": 0.4,  # 点赞概率 40%
     "scroll_min": 3,  # 最小滚动次数
     "scroll_max": 8,  # 最大滚动次数
     "wait_min": 1,  # 最小等待时间（秒）
     "wait_max": 3,  # 最大等待时间（秒）
 }
+
 
 
 # ============================================================================
@@ -559,7 +560,7 @@ def parse_args():
     parser.add_argument("--proxy", help="代理地址，如 127.0.0.1:7897")
     parser.add_argument("--topics", type=int, default=30, help="浏览帖子数量，默认 30")
     parser.add_argument(
-        "--like-rate", type=int, default=30, help="点赞概率（0-100），默认 30"
+        "--like-rate", type=int, default=40, help="点赞概率（0-100），默认 40"
     )
     parser.add_argument(
         "--no-headless", action="store_true", help="禁用无头模式（显示浏览器窗口）"
