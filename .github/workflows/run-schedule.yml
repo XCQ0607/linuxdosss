@@ -45,7 +45,6 @@
 name: Run Schedule
 
 on:
-  # 定时触发（默认每天北京时间 8:00 和 20:00 各运行一次）
   schedule:
     - cron: '0 */8 * * *' # 每8小时运行一次 (UTC 0:00, 8:00, 16:00)
 
@@ -55,7 +54,7 @@ on:
       topics:
         description: '浏览帖子数量'
         required: false
-        default: '80''
+        default: '80'
       like_rate:
         description: '点赞概率 (0-100)'
         required: false
