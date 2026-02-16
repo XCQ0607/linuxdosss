@@ -46,7 +46,7 @@ name: Run Schedule
 
 on:
   schedule:
-    - cron: '0 */8 * * *' # 每8小时运行一次 (UTC 0:00, 8:00, 16:00)
+    - cron: '0 */12 * * *' # 每12小时运行一次 (UTC 0:00, 12:00)
 
   # 手动触发
   workflow_dispatch:
@@ -54,7 +54,7 @@ on:
       topics:
         description: '浏览帖子数量'
         required: false
-        default: '200'
+        default: '100'
       like_rate:
         description: '点赞概率 (0-100)'
         required: false
@@ -63,7 +63,7 @@ on:
 jobs:
   browse:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 最长运行 60 分钟
+    # timeout-minutes: 60  # 最长运行 60 分钟
 
     steps:
       # 检出代码
