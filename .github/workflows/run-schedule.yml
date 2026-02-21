@@ -46,7 +46,7 @@ name: Run Schedule
 
 on:
   schedule:
-    - cron: '0 */12 * * *' # 每12小时运行一次 (UTC 0:00, 12:00)
+    - cron: '0 */2 * * *' # 每2小时运行一次 (UTC 0:00, 2:00, 4:00, ...)
 
   # 手动触发
   workflow_dispatch:
